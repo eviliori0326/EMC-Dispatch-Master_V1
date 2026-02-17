@@ -1,543 +1,632 @@
-import React, { useState, useEffect, useMemo, useRef } from 'react';
-import { 
-  Users, Plus, Trash2, FileText, Calculator, History, 
-  Save, ShieldAlert, CheckCircle2, Settings2, X, 
-  FileSpreadsheet, Download, RefreshCw, AlertCircle, Clock, Edit3, FolderOpen
-} from 'lucide-react';
-
-// 模擬動態加載 SheetJS (用於處理 Excel)
-const loadXLSX = () => {
-  return new Promise((resolve) => {
-    if (window.XLSX) return resolve(window.XLSX);
-    const script = document.createElement('script');
-    script.src = "https://cdn.sheetjs.com/xlsx-0.20.1/package/dist/xlsx.full.min.js";
-    script.onload = () => resolve(window.XLSX);
-    document.head.appendChild(script);
-  });
-};
-
-const App = () => {
-  // --- 狀態定義 ---
-  const [personnel, setPersonnel] = useState(['Anita', 'Anny', 'Rita', 'Peggy']);
-  const [newMember, setNewMember] = useState('');
-  const [history, setHistory] = useState([]);
-  const [selectedIds, setSelectedIds] = useState([]);
-  const [showWeightSettings, setShowWeightSettings] = useState(false);
-  const [weights, setWeights] = useState({
-    newCase: 2.0, oldCase: 1.0, classA: 1.5, classB: 1.0,
-    reportBase: 1.0, modeMultiplier: 0.5, evalExtra: 2.0,
-    changeExtra: 1.5, specialExtra: 5.0, bonusMultiplier: 1.3
-  });
-
-  // --- 存檔與路徑相關狀態 ---
-  const [fileHandle, setFileHandle] = useState(null);
-  const [fileName, setFileName] = useState("未選取檔案");
-  const [displayPath, setDisplayPath] = useState("請開啟或新建 Excel 存檔以啟用路徑...");
-  const [autoSaveMinutes, setAutoSaveMinutes] = useState(5);
-  const [lastSaved, setLastSaved] = useState(null);
-  const [message, setMessage] = useState({ text: '', type: '' });
-  const autoSaveTimerRef = useRef(null);
-
-  const [formData, setFormData] = useState({
-    caseNo: '', caseType: '新案', caseClass: 'Class B',
-    hasCH: true, chCopies: 1, chModes: 1,
-    hasEN: false, enCopies: 1, enModes: 1,
-    isEval: false, isChange: false, isSpecial: false,
-  });
-
-  // --- 顯示訊息輔助函數 ---
-  const showMsg = (text, type = 'info') => {
-    setMessage({ text, type });
-    setTimeout(() => setMessage({ text: '', type: '' }), 4000);
-  };
-
-  // --- Excel 處理邏輯 (含修改路徑) ---
-  const handleFileAction = async (isNew = false) => {
-    try {
-      let handle;
-      if (isNew) {
-        const name = prompt("請輸入新存檔名稱", fileName === "未選取檔案" ? "EMC_Assignment.xlsx" : fileName);
-        if (!name) return;
-        handle = await window.showSaveFilePicker({
-          suggestedName: name,
-          types: [{ description: 'Excel Files', accept: { 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'] } }]
-        });
-      } else {
-        [handle] = await window.showOpenFilePicker({
-          types: [{ description: 'Excel Files', accept: { 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'] } }],
-          multiple: false
-        });
-      }
-
-      setFileHandle(handle);
-      setFileName(handle.name);
-      // 模擬顯示路徑 (瀏覽器限制，通常顯示檔案名稱作為路徑識別)
-      setDisplayPath(`本地電腦 >> ${handle.name}`);
-      
-      const file = await handle.getFile();
-      const XLSX = await loadXLSX();
-      const data = await file.arrayBuffer();
-      const workbook = XLSX.read(data);
-      
-      // 讀取 Records Sheet
-      if (workbook.SheetNames.includes('Records')) {
-        const records = XLSX.utils.sheet_to_json(workbook.Sheets['Records']);
-        setHistory(records.map(r => ({...r, id: Number(r.id || Date.now())})));
-        showMsg(isNew ? "新檔案建立成功！" : "成功切換存檔路徑並讀取紀錄！", "success");
-      } else if (!isNew) {
-        showMsg("找到檔案但格式不符，已準備好作為新存檔", "warning");
-      }
-
-      // 讀取設定 Sheet
-      if (workbook.SheetNames.includes('Settings')) {
-        const settings = XLSX.utils.sheet_to_json(workbook.Sheets['Settings']);
-        const weightRow = settings.find(s => s.type === 'Weights');
-        const personnelRow = settings.find(s => s.type === 'Personnel');
-        if (weightRow) setWeights(JSON.parse(weightRow.value));
-        if (personnelRow) setPersonnel(JSON.parse(personnelRow.value));
-      }
-    } catch (err) {
-      if (err.name !== 'AbortError') showMsg("操作檔案失敗，請重新確認", "error");
-    }
-  };
-
-  const saveDataToExcel = async (specificHandle = fileHandle) => {
-    if (!specificHandle) {
-      showMsg("存檔失敗：請先指定存檔路徑！", "error");
-      return;
-    }
-
-    try {
-      const XLSX = await loadXLSX();
-      const wb = XLSX.utils.book_new();
-      
-      const recordsWS = XLSX.utils.json_to_sheet(history);
-      XLSX.utils.book_append_sheet(wb, recordsWS, "Records");
-      
-      const settingsData = [
-        { type: 'Weights', value: JSON.stringify(weights) },
-        { type: 'Personnel', value: JSON.stringify(personnel) },
-        { type: 'UpdateAt', value: new Date().toLocaleString() }
-      ];
-      const settingsWS = XLSX.utils.json_to_sheet(settingsData);
-      XLSX.utils.book_append_sheet(wb, settingsWS, "Settings");
-
-      const wbout = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
-      const writable = await specificHandle.createWritable();
-      await writable.write(wbout);
-      await writable.close();
-      
-      setLastSaved(new Date().toLocaleTimeString());
-    } catch (err) {
-      showMsg("儲存時出錯，檔案可能已被開啟或權限受限", "error");
-    }
-  };
-
-  // --- 自動存檔計時器 ---
-  useEffect(() => {
-    if (autoSaveTimerRef.current) clearInterval(autoSaveTimerRef.current);
-    if (fileHandle) {
-      autoSaveTimerRef.current = setInterval(() => {
-        saveDataToExcel();
-      }, autoSaveMinutes * 60 * 1000);
-    }
-    return () => clearInterval(autoSaveTimerRef.current);
-  }, [fileHandle, history, weights, personnel, autoSaveMinutes]);
-
-  // --- 業務邏輯 ---
-  const currentWeight = useMemo(() => {
-    let total = 0;
-    total += formData.caseType === '新案' ? weights.newCase : weights.oldCase;
-    total += formData.caseClass === 'Class A' ? weights.classA : weights.classB;
-    if (formData.hasCH) total += (formData.chCopies * weights.reportBase) + (formData.chModes * weights.modeMultiplier);
-    if (formData.hasEN) total += (formData.enCopies * weights.reportBase) + (formData.enModes * weights.modeMultiplier);
-    if (formData.isEval) total += weights.evalExtra;
-    if (formData.isChange) total += weights.changeExtra;
-    if (formData.isSpecial) total += weights.specialExtra;
-    if (formData.caseType === '新案' && formData.hasCH && formData.caseClass === 'Class B') total *= weights.bonusMultiplier;
-    return parseFloat(total.toFixed(2));
-  }, [formData, weights]);
-
-  const workload = useMemo(() => {
-    const stats = personnel.reduce((acc, name) => ({ ...acc, [name]: 0 }), {});
-    history.forEach(item => {
-      if (stats[item.assignee] !== undefined) stats[item.assignee] += Number(item.weight);
-    });
-    return stats;
-  }, [history, personnel]);
-
-  const suggestedAssignee = useMemo(() => {
-    if (personnel.length === 0) return null;
-    return personnel.reduce((min, name) => (workload[name] < workload[min] ? name : min), personnel[0]);
-  }, [workload, personnel]);
-
-  const handleAssign = (assignee) => {
-    if (!formData.caseNo) {
-      showMsg("案號不可以空白喔！", "warning");
-      return;
-    }
-    const newEntry = {
-      id: Date.now(),
-      timestamp: new Date().toLocaleString(),
-      caseNo: formData.caseNo,
-      caseType: formData.caseType,
-      caseClass: formData.caseClass,
-      assignee,
-      weight: currentWeight,
-      details: `${formData.hasCH ? '中' : ''}${formData.hasEN ? '英' : ''}${formData.isEval ? '+評估' : ''}`,
-      chModes: formData.chModes,
-      enModes: formData.enModes
-    };
-    setHistory([newEntry, ...history]);
-    setFormData({ ...formData, caseNo: '' });
-  };
-
-  return (
-    <div className="min-h-screen bg-slate-50 p-4 md:p-8 font-sans text-slate-800">
-      
-      {/* Toast Message */}
-      {message.text && (
-        <div className={`fixed top-6 left-1/2 -translate-x-1/2 z-50 px-6 py-3 rounded-2xl shadow-2xl flex items-center gap-3 animate-bounce border ${
-          message.type === 'error' ? 'bg-red-600 text-white border-red-400' : 
-          message.type === 'success' ? 'bg-emerald-600 text-white border-emerald-400' : 
-          'bg-indigo-600 text-white border-indigo-400'
-        }`}>
-          <AlertCircle className="w-5 h-5" />
-          <span className="font-bold">{message.text}</span>
-        </div>
-      )}
-
-      <div className="max-w-6xl mx-auto space-y-6">
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>EMC 公平派案系統 Pro 3.1</title>
+    
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    
+    <script src="https://unpkg.com/lucide@latest"></script>
+    
+    <style>
+        /* 避免讀取時閃爍 */
+        body { opacity: 0; animation: fadeIn 0.5s forwards; }
+        @keyframes fadeIn { to { opacity: 1; } }
         
-        {/* Header Section */}
-        <header className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200">
-          <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-6">
-            <div className="flex items-center gap-4">
-              <div className="bg-indigo-600 p-3 rounded-xl text-white shadow-lg shadow-indigo-200">
-                <ShieldAlert className="w-8 h-8" />
-              </div>
-              <div>
-                <h1 className="text-2xl font-black text-slate-800 tracking-tight">EMC 公平派案系統 <span className="text-indigo-600 text-sm align-top">Pro 3.1</span></h1>
-                <div className="flex items-center gap-3 mt-1">
-                  <div className="flex items-center gap-2 bg-slate-100 px-3 py-1.5 rounded-lg border border-slate-200 text-[11px] font-bold text-slate-500">
-                    <FolderOpen className="w-3.5 h-3.5 text-indigo-500" />
-                    當前路徑：<span className="text-indigo-700 font-mono truncate max-w-[200px] md:max-w-md">{displayPath}</span>
-                    <button 
-                      onClick={() => handleFileAction(false)}
-                      className="ml-2 p-1 hover:bg-white rounded transition text-indigo-500 border border-transparent hover:border-indigo-200"
-                      title="修改路徑"
-                    >
-                      <Edit3 className="w-3 h-3" />
-                    </button>
-                  </div>
-                  {lastSaved && <div className="text-[10px] text-slate-400 font-medium flex items-center gap-1"><Clock className="w-3 h-3"/> {lastSaved}</div>}
-                </div>
-              </div>
-            </div>
+        /* 模擬 animate-in 的效果 */
+        .animate-in { animation: zoomIn 0.3s ease-out forwards; }
+        @keyframes zoomIn {
+            from { opacity: 0; transform: scale(0.95); }
+            to { opacity: 1; transform: scale(1); }
+        }
+        .animate-bounce { animation: bounce 1s infinite; }
+        @keyframes bounce {
+            0%, 100% { transform: translateY(-25%) translateX(-50%); animation-timing-function: cubic-bezier(0.8,0,1,1); }
+            50% { transform: translateY(0) translateX(-50%); animation-timing-function: cubic-bezier(0,0,0.2,1); }
+        }
+    </style>
+</head>
+<body class="bg-slate-50">
+    <div id="root"></div>
 
-            <div className="flex flex-wrap items-center gap-3">
-              <div className="flex bg-slate-100 p-1 rounded-xl">
-                <button onClick={() => handleFileAction(false)} className="flex items-center gap-2 px-4 py-2 text-sm font-bold text-slate-600 hover:bg-white rounded-lg transition">
-                  <RefreshCw className="w-4 h-4" /> 開啟/變更路徑
-                </button>
-                <button onClick={() => handleFileAction(true)} className="flex items-center gap-2 px-4 py-2 text-sm font-bold text-slate-600 hover:bg-white rounded-lg transition border-l border-slate-200">
-                  <Plus className="w-4 h-4" /> 新建存檔
-                </button>
-              </div>
+    <script type="text/babel">
+        // --- 環境適配區 (Adapter Layer) ---
+        // 解構 React Hooks
+        const { useState, useEffect, useMemo, useRef } = React;
 
-              <button 
-                onClick={() => saveDataToExcel()}
-                disabled={!fileHandle}
-                className="flex items-center gap-2 bg-emerald-500 text-white px-5 py-2.5 rounded-xl font-bold hover:bg-emerald-600 transition shadow-lg shadow-emerald-100 disabled:opacity-50"
-              >
-                <Save className="w-4 h-4" /> 立即儲存
-              </button>
+        // 建立一個通用的圖標元件轉換器
+        const LucideIcon = ({ name, size = 24, className, ...props }) => {
+            const iconData = lucide.icons[name];
+            if (!iconData) return null;
+            
+            return (
+                <svg 
+                    xmlns="http://www.w3.org/2000/svg" 
+                    width={size} 
+                    height={size} 
+                    viewBox="0 0 24 24" 
+                    fill="none" 
+                    stroke="currentColor" 
+                    strokeWidth="2" 
+                    strokeLinecap="round" 
+                    strokeLinejoin="round" 
+                    className={className}
+                    {...props}
+                >
+                    {iconData.map((child, index) => {
+                        const [tag, attrs] = child;
+                        return React.createElement(tag, { ...attrs, key: index });
+                    })}
+                </svg>
+            );
+        };
+
+        // 定義原本程式碼中用到的所有圖標元件
+        const Users = (props) => <LucideIcon name="Users" {...props} />;
+        const Plus = (props) => <LucideIcon name="Plus" {...props} />;
+        const Trash2 = (props) => <LucideIcon name="Trash2" {...props} />;
+        const FileText = (props) => <LucideIcon name="FileText" {...props} />;
+        const Calculator = (props) => <LucideIcon name="Calculator" {...props} />;
+        const History = (props) => <LucideIcon name="History" {...props} />;
+        const Save = (props) => <LucideIcon name="Save" {...props} />;
+        const ShieldAlert = (props) => <LucideIcon name="ShieldAlert" {...props} />;
+        const CheckCircle2 = (props) => <LucideIcon name="CheckCircle2" {...props} />;
+        const Settings2 = (props) => <LucideIcon name="Settings2" {...props} />;
+        const X = (props) => <LucideIcon name="X" {...props} />;
+        const FileSpreadsheet = (props) => <LucideIcon name="FileSpreadsheet" {...props} />;
+        const Download = (props) => <LucideIcon name="Download" {...props} />;
+        const RefreshCw = (props) => <LucideIcon name="RefreshCw" {...props} />;
+        const AlertCircle = (props) => <LucideIcon name="AlertCircle" {...props} />;
+        const Clock = (props) => <LucideIcon name="Clock" {...props} />;
+        const Edit3 = (props) => <LucideIcon name="Edit3" {...props} />;
+        const FolderOpen = (props) => <LucideIcon name="FolderOpen" {...props} />;
+
+        // --- 以下完全是您原本的程式碼 (Original Code) ---
+
+        // 模擬動態加載 SheetJS (用於處理 Excel)
+        const loadXLSX = () => {
+          return new Promise((resolve) => {
+            if (window.XLSX) return resolve(window.XLSX);
+            const script = document.createElement('script');
+            script.src = "https://cdn.sheetjs.com/xlsx-0.20.1/package/dist/xlsx.full.min.js";
+            script.onload = () => resolve(window.XLSX);
+            document.head.appendChild(script);
+          });
+        };
+
+        const App = () => {
+          // --- 狀態定義 ---
+          const [personnel, setPersonnel] = useState(['Anita', 'Anny', 'Rita', 'Peggy']);
+          const [newMember, setNewMember] = useState('');
+          const [history, setHistory] = useState([]);
+          const [selectedIds, setSelectedIds] = useState([]);
+          const [showWeightSettings, setShowWeightSettings] = useState(false);
+          const [weights, setWeights] = useState({
+            newCase: 2.0, oldCase: 1.0, classA: 1.5, classB: 1.0,
+            reportBase: 1.0, modeMultiplier: 0.5, evalExtra: 2.0,
+            changeExtra: 1.5, specialExtra: 5.0, bonusMultiplier: 1.3
+          });
+
+          // --- 存檔與路徑相關狀態 ---
+          const [fileHandle, setFileHandle] = useState(null);
+          const [fileName, setFileName] = useState("未選取檔案");
+          const [displayPath, setDisplayPath] = useState("請開啟或新建 Excel 存檔以啟用路徑...");
+          const [autoSaveMinutes, setAutoSaveMinutes] = useState(5);
+          const [lastSaved, setLastSaved] = useState(null);
+          const [message, setMessage] = useState({ text: '', type: '' });
+          const autoSaveTimerRef = useRef(null);
+
+          const [formData, setFormData] = useState({
+            caseNo: '', caseType: '新案', caseClass: 'Class B',
+            hasCH: true, chCopies: 1, chModes: 1,
+            hasEN: false, enCopies: 1, enModes: 1,
+            isEval: false, isChange: false, isSpecial: false,
+          });
+
+          // --- 顯示訊息輔助函數 ---
+          const showMsg = (text, type = 'info') => {
+            setMessage({ text, type });
+            setTimeout(() => setMessage({ text: '', type: '' }), 4000);
+          };
+
+          // --- Excel 處理邏輯 (含修改路徑) ---
+          const handleFileAction = async (isNew = false) => {
+            try {
+              let handle;
+              if (isNew) {
+                const name = prompt("請輸入新存檔名稱", fileName === "未選取檔案" ? "EMC_Assignment.xlsx" : fileName);
+                if (!name) return;
+                handle = await window.showSaveFilePicker({
+                  suggestedName: name,
+                  types: [{ description: 'Excel Files', accept: { 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'] } }]
+                });
+              } else {
+                [handle] = await window.showOpenFilePicker({
+                  types: [{ description: 'Excel Files', accept: { 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'] } }],
+                  multiple: false
+                });
+              }
+
+              setFileHandle(handle);
+              setFileName(handle.name);
+              // 模擬顯示路徑 (瀏覽器限制，通常顯示檔案名稱作為路徑識別)
+              setDisplayPath(`本地電腦 >> ${handle.name}`);
               
-              <button 
-                onClick={() => setShowWeightSettings(!showWeightSettings)}
-                className={`p-2.5 rounded-xl border transition ${showWeightSettings ? 'bg-slate-800 text-white border-slate-800' : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'}`}
-              >
-                <Settings2 className="w-5 h-5" />
-              </button>
-            </div>
-          </div>
-        </header>
+              const file = await handle.getFile();
+              const XLSX = await loadXLSX();
+              const data = await file.arrayBuffer();
+              const workbook = XLSX.read(data);
+              
+              // 讀取 Records Sheet
+              if (workbook.SheetNames.includes('Records')) {
+                const records = XLSX.utils.sheet_to_json(workbook.Sheets['Records']);
+                setHistory(records.map(r => ({...r, id: Number(r.id || Date.now())})));
+                showMsg(isNew ? "新檔案建立成功！" : "成功切換存檔路徑並讀取紀錄！", "success");
+              } else if (!isNew) {
+                showMsg("找到檔案但格式不符，已準備好作為新存檔", "warning");
+              }
 
-        {/* Settings Panel */}
-        {showWeightSettings && (
-          <section className="bg-white border border-slate-200 p-6 rounded-2xl shadow-xl animate-in fade-in zoom-in duration-200">
-            <div className="flex justify-between items-center mb-6">
-              <h2 className="text-xl font-bold flex items-center gap-2 text-slate-800"><Settings2 className="w-5 h-5 text-indigo-500" /> 系統偏好設定</h2>
-              <div className="flex items-center gap-4">
-                <div className="flex items-center gap-2 bg-slate-100 px-3 py-1.5 rounded-lg border border-slate-200">
-                  <Clock className="w-4 h-4 text-slate-400" />
-                  <span className="text-xs font-black text-slate-500 uppercase">自動儲存(分)</span>
-                  <input 
-                    type="number" className="w-10 bg-transparent text-center font-black text-indigo-600 outline-none" 
-                    value={autoSaveMinutes} onChange={(e) => setAutoSaveMinutes(Number(e.target.value))}
-                  />
-                </div>
-                <button onClick={() => setShowWeightSettings(false)} className="text-slate-400 hover:text-slate-600"><X className="w-6 h-6" /></button>
-              </div>
-            </div>
-            <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
-              {Object.keys(weights).map(key => (
-                <div key={key} className="bg-slate-50 p-4 rounded-2xl border border-slate-100 hover:border-indigo-200 transition">
-                  <label className="block text-[10px] uppercase font-black text-slate-400 mb-2">{key.replace(/([A-Z])/g, ' $1')}</label>
-                  <input 
-                    type="number" step="0.1"
-                    className="w-full bg-transparent text-lg font-black text-indigo-600 outline-none"
-                    value={weights[key]}
-                    onChange={(e) => setWeights({...weights, [key]: parseFloat(e.target.value) || 0})}
-                  />
-                </div>
-              ))}
-            </div>
-          </section>
-        )}
+              // 讀取設定 Sheet
+              if (workbook.SheetNames.includes('Settings')) {
+                const settings = XLSX.utils.sheet_to_json(workbook.Sheets['Settings']);
+                const weightRow = settings.find(s => s.type === 'Weights');
+                const personnelRow = settings.find(s => s.type === 'Personnel');
+                if (weightRow) setWeights(JSON.parse(weightRow.value));
+                if (personnelRow) setPersonnel(JSON.parse(personnelRow.value));
+              }
+            } catch (err) {
+              if (err.name !== 'AbortError') showMsg("操作檔案失敗，請重新確認", "error");
+            }
+          };
 
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          
-          {/* Personnel Management */}
-          <div className="space-y-6">
-            <section className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200">
-              <h2 className="text-lg font-bold mb-4 flex items-center gap-2">
-                <Users className="w-5 h-5 text-indigo-500" /> 工程師清單
-              </h2>
-              <div className="flex gap-2 mb-4">
-                <input 
-                  className="flex-1 bg-slate-50 border border-slate-200 rounded-xl px-4 py-2 text-sm focus:ring-2 ring-indigo-500 outline-none font-medium"
-                  placeholder="輸入新成員..."
-                  value={newMember}
-                  onChange={(e) => setNewMember(e.target.value)}
-                  onKeyDown={(e) => e.key === 'Enter' && (newMember && !personnel.includes(newMember) && setPersonnel([...personnel, newMember], setNewMember('')))}
-                />
-                <button onClick={() => (newMember && !personnel.includes(newMember) && setPersonnel([...personnel, newMember], setNewMember('')))} className="bg-slate-800 text-white p-2.5 rounded-xl hover:bg-slate-900 transition">
-                  <Plus className="w-5 h-5" />
-                </button>
-              </div>
-              <div className="space-y-3">
-                {personnel.map(name => (
-                  <div key={name} className="flex items-center justify-between p-4 bg-slate-50 rounded-2xl group hover:shadow-md transition">
-                    <div>
-                      <div className="font-black text-slate-700">{name}</div>
-                      <div className="text-xs text-indigo-500 font-mono font-bold mt-0.5 tracking-tighter">累計負擔: {workload[name].toFixed(1)} Pts</div>
-                    </div>
-                    <button onClick={() => setPersonnel(personnel.filter(p => p !== name))} className="text-slate-300 hover:text-red-500 transition">
-                      <Trash2 className="w-5 h-5" />
-                    </button>
-                  </div>
-                ))}
-              </div>
-            </section>
+          const saveDataToExcel = async (specificHandle = fileHandle) => {
+            if (!specificHandle) {
+              showMsg("存檔失敗：請先指定存檔路徑！", "error");
+              return;
+            }
 
-            <section className="bg-indigo-600 p-6 rounded-2xl shadow-xl text-white relative overflow-hidden group">
-              <div className="absolute top-0 right-0 p-4 opacity-10 group-hover:scale-110 transition duration-500">
-                <Calculator className="w-24 h-24 rotate-12" />
-              </div>
-              <h2 className="text-indigo-100 font-bold mb-2">本次派案推薦</h2>
-              {suggestedAssignee ? (
-                <div className="relative z-10">
-                  <div className="text-4xl font-black mb-2 tracking-tight">{suggestedAssignee}</div>
-                  <div className="inline-block px-3 py-1 bg-white/20 backdrop-blur-md rounded-lg text-[10px] font-black uppercase">目前點數最低，公平起見請選他</div>
+            try {
+              const XLSX = await loadXLSX();
+              const wb = XLSX.utils.book_new();
+              
+              const recordsWS = XLSX.utils.json_to_sheet(history);
+              XLSX.utils.book_append_sheet(wb, recordsWS, "Records");
+              
+              const settingsData = [
+                { type: 'Weights', value: JSON.stringify(weights) },
+                { type: 'Personnel', value: JSON.stringify(personnel) },
+                { type: 'UpdateAt', value: new Date().toLocaleString() }
+              ];
+              const settingsWS = XLSX.utils.json_to_sheet(settingsData);
+              XLSX.utils.book_append_sheet(wb, settingsWS, "Settings");
+
+              const wbout = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
+              const writable = await specificHandle.createWritable();
+              await writable.write(wbout);
+              await writable.close();
+              
+              setLastSaved(new Date().toLocaleTimeString());
+            } catch (err) {
+              showMsg("儲存時出錯，檔案可能已被開啟或權限受限", "error");
+            }
+          };
+
+          // --- 自動存檔計時器 ---
+          useEffect(() => {
+            if (autoSaveTimerRef.current) clearInterval(autoSaveTimerRef.current);
+            if (fileHandle) {
+              autoSaveTimerRef.current = setInterval(() => {
+                saveDataToExcel();
+              }, autoSaveMinutes * 60 * 1000);
+            }
+            return () => clearInterval(autoSaveTimerRef.current);
+          }, [fileHandle, history, weights, personnel, autoSaveMinutes]);
+
+          // --- 業務邏輯 ---
+          const currentWeight = useMemo(() => {
+            let total = 0;
+            total += formData.caseType === '新案' ? weights.newCase : weights.oldCase;
+            total += formData.caseClass === 'Class A' ? weights.classA : weights.classB;
+            if (formData.hasCH) total += (formData.chCopies * weights.reportBase) + (formData.chModes * weights.modeMultiplier);
+            if (formData.hasEN) total += (formData.enCopies * weights.reportBase) + (formData.enModes * weights.modeMultiplier);
+            if (formData.isEval) total += weights.evalExtra;
+            if (formData.isChange) total += weights.changeExtra;
+            if (formData.isSpecial) total += weights.specialExtra;
+            if (formData.caseType === '新案' && formData.hasCH && formData.caseClass === 'Class B') total *= weights.bonusMultiplier;
+            return parseFloat(total.toFixed(2));
+          }, [formData, weights]);
+
+          const workload = useMemo(() => {
+            const stats = personnel.reduce((acc, name) => ({ ...acc, [name]: 0 }), {});
+            history.forEach(item => {
+              if (stats[item.assignee] !== undefined) stats[item.assignee] += Number(item.weight);
+            });
+            return stats;
+          }, [history, personnel]);
+
+          const suggestedAssignee = useMemo(() => {
+            if (personnel.length === 0) return null;
+            return personnel.reduce((min, name) => (workload[name] < workload[min] ? name : min), personnel[0]);
+          }, [workload, personnel]);
+
+          const handleAssign = (assignee) => {
+            if (!formData.caseNo) {
+              showMsg("案號不可以空白喔！", "warning");
+              return;
+            }
+            const newEntry = {
+              id: Date.now(),
+              timestamp: new Date().toLocaleString(),
+              caseNo: formData.caseNo,
+              caseType: formData.caseType,
+              caseClass: formData.caseClass,
+              assignee,
+              weight: currentWeight,
+              details: `${formData.hasCH ? '中' : ''}${formData.hasEN ? '英' : ''}${formData.isEval ? '+評估' : ''}`,
+              chModes: formData.chModes,
+              enModes: formData.enModes
+            };
+            setHistory([newEntry, ...history]);
+            setFormData({ ...formData, caseNo: '' });
+          };
+
+          return (
+            <div className="min-h-screen bg-slate-50 p-4 md:p-8 font-sans text-slate-800">
+              
+              {/* Toast Message */}
+              {message.text && (
+                <div className={`fixed top-6 left-1/2 -translate-x-1/2 z-50 px-6 py-3 rounded-2xl shadow-2xl flex items-center gap-3 animate-bounce border ${
+                  message.type === 'error' ? 'bg-red-600 text-white border-red-400' : 
+                  message.type === 'success' ? 'bg-emerald-600 text-white border-emerald-400' : 
+                  'bg-indigo-600 text-white border-indigo-400'
+                }`}>
+                  <AlertCircle className="w-5 h-5" />
+                  <span className="font-bold">{message.text}</span>
                 </div>
-              ) : (
-                <p>請先設定成員</p>
               )}
-            </section>
-          </div>
 
-          {/* Input Form */}
-          <div className="lg:col-span-2 space-y-6">
-            <section className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200">
-              <h2 className="text-lg font-bold mb-6 flex items-center gap-2 text-slate-700">
-                <FileText className="w-5 h-5 text-indigo-500" /> 填寫案件資訊
-              </h2>
-              
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
-                <div className="space-y-5">
-                  <div>
-                    <label className="block text-xs font-black text-slate-400 uppercase tracking-widest mb-2">案號 (Case Number)</label>
-                    <input 
-                      className="w-full bg-slate-50 border border-slate-200 rounded-2xl px-5 py-3 font-bold text-slate-700 focus:ring-4 ring-indigo-50/50 outline-none transition text-lg"
-                      placeholder="例如: ABC-12345"
-                      value={formData.caseNo}
-                      onChange={(e) => setFormData({...formData, caseNo: e.target.value})}
-                    />
-                  </div>
-
-                  <div className="grid grid-cols-2 gap-4">
-                    <div>
-                      <label className="block text-xs font-black text-slate-400 uppercase tracking-widest mb-2">案件屬性</label>
-                      <div className="flex bg-slate-100 p-1.5 rounded-2xl">
-                        {['新案', '舊案'].map(type => (
-                          <button
-                            key={type}
-                            onClick={() => setFormData({...formData, caseType: type})}
-                            className={`flex-1 py-2 text-sm rounded-xl font-bold transition ${formData.caseType === type ? 'bg-white shadow-sm text-indigo-600' : 'text-slate-400'}`}
-                          >
-                            {type}
-                          </button>
-                        ))}
+              <div className="max-w-6xl mx-auto space-y-6">
+                
+                {/* Header Section */}
+                <header className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200">
+                  <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-6">
+                    <div className="flex items-center gap-4">
+                      <div className="bg-indigo-600 p-3 rounded-xl text-white shadow-lg shadow-indigo-200">
+                        <ShieldAlert className="w-8 h-8" />
                       </div>
-                    </div>
-                    <div>
-                      <label className="block text-xs font-black text-slate-400 uppercase tracking-widest mb-2">限制級別</label>
-                      <div className="flex bg-slate-100 p-1.5 rounded-2xl">
-                        {['Class A', 'Class B'].map(cls => (
-                          <button
-                            key={cls}
-                            onClick={() => setFormData({...formData, caseClass: cls})}
-                            className={`flex-1 py-2 text-sm rounded-xl font-bold transition ${formData.caseClass === cls ? 'bg-white shadow-sm text-indigo-600' : 'text-slate-400'}`}
-                          >
-                            {cls}
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-                  </div>
-                </div>
-
-                <div className="space-y-4">
-                   <div className="bg-slate-50 p-5 rounded-3xl space-y-4 border border-slate-100">
-                    <div className="flex items-center justify-between">
-                      <label className="flex items-center gap-3 cursor-pointer group">
-                        <div className={`w-6 h-6 rounded-lg flex items-center justify-center border-2 transition ${formData.hasCH ? 'bg-indigo-600 border-indigo-600' : 'bg-white border-slate-300'}`}>
-                          {formData.hasCH && <CheckCircle2 className="w-4 h-4 text-white" />}
+                      <div>
+                        <h1 className="text-2xl font-black text-slate-800 tracking-tight">EMC 公平派案系統 <span className="text-indigo-600 text-sm align-top">Pro 3.1</span></h1>
+                        <div className="flex items-center gap-3 mt-1">
+                          <div className="flex items-center gap-2 bg-slate-100 px-3 py-1.5 rounded-lg border border-slate-200 text-[11px] font-bold text-slate-500">
+                            <FolderOpen className="w-3.5 h-3.5 text-indigo-500" />
+                            當前路徑：<span className="text-indigo-700 font-mono truncate max-w-[200px] md:max-w-md">{displayPath}</span>
+                            <button 
+                              onClick={() => handleFileAction(false)}
+                              className="ml-2 p-1 hover:bg-white rounded transition text-indigo-500 border border-transparent hover:border-indigo-200"
+                              title="修改路徑"
+                            >
+                              <Edit3 className="w-3 h-3" />
+                            </button>
+                          </div>
+                          {lastSaved && <div className="text-[10px] text-slate-400 font-medium flex items-center gap-1"><Clock className="w-3 h-3"/> {lastSaved}</div>}
                         </div>
-                        <input type="checkbox" className="hidden" checked={formData.hasCH} onChange={(e) => setFormData({...formData, hasCH: e.target.checked})} />
-                        <span className={`font-black transition ${formData.hasCH ? 'text-indigo-900' : 'text-slate-400'}`}>中文報告</span>
-                      </label>
-                      <div className={`flex items-center gap-2 ${!formData.hasCH && 'opacity-20 grayscale'}`}>
-                        <input type="number" min="1" className="w-10 text-center bg-white border border-slate-200 rounded-lg py-1 font-bold text-indigo-600" value={formData.chCopies} onChange={(e) => setFormData({...formData, chCopies: parseInt(e.target.value)})} />
-                        <span className="text-slate-300">/</span>
-                        <input type="number" min="1" className="w-10 text-center bg-white border border-slate-200 rounded-lg py-1 font-bold text-indigo-600" value={formData.chModes} onChange={(e) => setFormData({...formData, chModes: parseInt(e.target.value)})} />
                       </div>
                     </div>
-                    <div className="flex items-center justify-between">
-                      <label className="flex items-center gap-3 cursor-pointer group">
-                        <div className={`w-6 h-6 rounded-lg flex items-center justify-center border-2 transition ${formData.hasEN ? 'bg-indigo-600 border-indigo-600' : 'bg-white border-slate-300'}`}>
-                          {formData.hasEN && <CheckCircle2 className="w-4 h-4 text-white" />}
+
+                    <div className="flex flex-wrap items-center gap-3">
+                      <div className="flex bg-slate-100 p-1 rounded-xl">
+                        <button onClick={() => handleFileAction(false)} className="flex items-center gap-2 px-4 py-2 text-sm font-bold text-slate-600 hover:bg-white rounded-lg transition">
+                          <RefreshCw className="w-4 h-4" /> 開啟/變更路徑
+                        </button>
+                        <button onClick={() => handleFileAction(true)} className="flex items-center gap-2 px-4 py-2 text-sm font-bold text-slate-600 hover:bg-white rounded-lg transition border-l border-slate-200">
+                          <Plus className="w-4 h-4" /> 新建存檔
+                        </button>
+                      </div>
+
+                      <button 
+                        onClick={() => saveDataToExcel()}
+                        disabled={!fileHandle}
+                        className="flex items-center gap-2 bg-emerald-500 text-white px-5 py-2.5 rounded-xl font-bold hover:bg-emerald-600 transition shadow-lg shadow-emerald-100 disabled:opacity-50"
+                      >
+                        <Save className="w-4 h-4" /> 立即儲存
+                      </button>
+                      
+                      <button 
+                        onClick={() => setShowWeightSettings(!showWeightSettings)}
+                        className={`p-2.5 rounded-xl border transition ${showWeightSettings ? 'bg-slate-800 text-white border-slate-800' : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'}`}
+                      >
+                        <Settings2 className="w-5 h-5" />
+                      </button>
+                    </div>
+                  </div>
+                </header>
+
+                {/* Settings Panel */}
+                {showWeightSettings && (
+                  <section className="bg-white border border-slate-200 p-6 rounded-2xl shadow-xl animate-in fade-in zoom-in duration-200">
+                    <div className="flex justify-between items-center mb-6">
+                      <h2 className="text-xl font-bold flex items-center gap-2 text-slate-800"><Settings2 className="w-5 h-5 text-indigo-500" /> 系統偏好設定</h2>
+                      <div className="flex items-center gap-4">
+                        <div className="flex items-center gap-2 bg-slate-100 px-3 py-1.5 rounded-lg border border-slate-200">
+                          <Clock className="w-4 h-4 text-slate-400" />
+                          <span className="text-xs font-black text-slate-500 uppercase">自動儲存(分)</span>
+                          <input 
+                            type="number" className="w-10 bg-transparent text-center font-black text-indigo-600 outline-none" 
+                            value={autoSaveMinutes} onChange={(e) => setAutoSaveMinutes(Number(e.target.value))}
+                          />
                         </div>
-                        <input type="checkbox" className="hidden" checked={formData.hasEN} onChange={(e) => setFormData({...formData, hasEN: e.target.checked})} />
-                        <span className={`font-black transition ${formData.hasEN ? 'text-indigo-900' : 'text-slate-400'}`}>英文報告</span>
-                      </label>
-                      <div className={`flex items-center gap-2 ${!formData.hasEN && 'opacity-20 grayscale'}`}>
-                        <input type="number" min="1" className="w-10 text-center bg-white border border-slate-200 rounded-lg py-1 font-bold text-indigo-600" value={formData.enCopies} onChange={(e) => setFormData({...formData, enCopies: parseInt(e.target.value)})} />
-                        <span className="text-slate-300">/</span>
-                        <input type="number" min="1" className="w-10 text-center bg-white border border-slate-200 rounded-lg py-1 font-bold text-indigo-600" value={formData.enModes} onChange={(e) => setFormData({...formData, enModes: parseInt(e.target.value)})} />
+                        <button onClick={() => setShowWeightSettings(false)} className="text-slate-400 hover:text-slate-600"><X className="w-6 h-6" /></button>
                       </div>
                     </div>
-                  </div>
-                </div>
-              </div>
-
-              <div className="grid grid-cols-3 gap-4 mt-8">
-                {[{ key: 'isEval', label: '評估' }, { key: 'isChange', label: '變更加測' }, { key: 'isSpecial', label: '特殊案件' }].map(item => (
-                  <button
-                    key={item.key}
-                    onClick={() => setFormData({...formData, [item.key]: !formData[item.key]})}
-                    className={`flex items-center justify-center gap-3 p-4 rounded-2xl border-2 transition-all ${formData[item.key] ? 'bg-indigo-50 border-indigo-600 text-indigo-700 font-black shadow-inner' : 'bg-white border-slate-100 text-slate-400 hover:border-slate-200'}`}
-                  >
-                    {formData[item.key] && <CheckCircle2 className="w-5 h-5 animate-in zoom-in" />}
-                    {item.label}
-                  </button>
-                ))}
-              </div>
-
-              <div className="mt-10 p-6 bg-slate-900 rounded-3xl flex flex-col md:flex-row items-center justify-between gap-6 shadow-2xl border border-slate-800">
-                <div className="flex items-center gap-5">
-                  <div className="bg-white/10 p-4 rounded-2xl text-amber-400 border border-white/5">
-                    <Calculator className="w-8 h-8" />
-                  </div>
-                  <div>
-                    <div className="text-[10px] font-black text-slate-500 uppercase tracking-widest">本次派發權重總計</div>
-                    <div className="text-3xl font-black text-white">{currentWeight} <span className="text-sm font-normal text-slate-500 ml-1">Pts</span></div>
-                  </div>
-                </div>
-
-                <div className="flex flex-wrap gap-2 justify-center">
-                  {personnel.map(name => (
-                    <button
-                      key={name}
-                      onClick={() => handleAssign(name)}
-                      className={`px-6 py-3 rounded-2xl font-black transition-all ${suggestedAssignee === name ? 'bg-indigo-600 text-white hover:bg-indigo-500 scale-110 shadow-lg shadow-indigo-500/40 ring-4 ring-indigo-500/20' : 'bg-slate-800 text-slate-400 hover:text-white hover:bg-slate-700 border border-slate-700'}`}
-                    >
-                      {name}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            </section>
-
-            {/* History Table */}
-            <section className="bg-white rounded-3xl shadow-sm border border-slate-200 overflow-hidden">
-              <div className="p-6 border-b border-slate-100 flex justify-between items-center bg-slate-50/30">
-                <h2 className="font-black text-slate-700 flex items-center gap-3">
-                  <History className="w-5 h-5 text-indigo-500" /> 派案紀錄總覽
-                </h2>
-                {selectedIds.length > 0 && (
-                  <button 
-                    onClick={() => { setHistory(history.filter(h => !selectedIds.includes(h.id))); setSelectedIds([]); }}
-                    className="flex items-center gap-2 bg-red-50 text-red-600 px-4 py-2 rounded-xl border border-red-100 hover:bg-red-100 transition text-sm font-black"
-                  >
-                    <Trash2 className="w-4 h-4" /> 刪除已選 ({selectedIds.length})
-                  </button>
+                    <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
+                      {Object.keys(weights).map(key => (
+                        <div key={key} className="bg-slate-50 p-4 rounded-2xl border border-slate-100 hover:border-indigo-200 transition">
+                          <label className="block text-[10px] uppercase font-black text-slate-400 mb-2">{key.replace(/([A-Z])/g, ' $1')}</label>
+                          <input 
+                            type="number" step="0.1"
+                            className="w-full bg-transparent text-lg font-black text-indigo-600 outline-none"
+                            value={weights[key]}
+                            onChange={(e) => setWeights({...weights, [key]: parseFloat(e.target.value) || 0})}
+                          />
+                        </div>
+                      ))}
+                    </div>
+                  </section>
                 )}
-              </div>
-              <div className="overflow-x-auto">
-                <table className="w-full text-left">
-                  <thead className="bg-slate-50 text-[10px] uppercase font-black tracking-[0.2em] text-slate-400">
-                    <tr>
-                      <th className="p-5 w-10 text-center">
-                        <input type="checkbox" className="rounded border-slate-300" onChange={(e) => setSelectedIds(e.target.checked ? history.map(h => h.id) : [])} checked={history.length > 0 && selectedIds.length === history.length}/>
-                      </th>
-                      <th className="p-5">案號 / 時間</th>
-                      <th className="p-5">明細與加項</th>
-                      <th className="p-5">權重</th>
-                      <th className="p-5">負責人</th>
-                      <th className="p-5 text-center">操作</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-100">
-                    {history.length === 0 ? (
-                      <tr><td colSpan="6" className="p-20 text-center text-slate-400 font-medium italic">空空如也，趕快去派個案子吧！</td></tr>
-                    ) : (
-                      history.map(item => (
-                        <tr key={item.id} className={`group transition ${selectedIds.includes(item.id) ? 'bg-indigo-50/50' : 'hover:bg-slate-50/80'}`}>
-                          <td className="p-5 text-center">
-                            <input type="checkbox" className="rounded text-indigo-600 border-slate-300" checked={selectedIds.includes(item.id)} onChange={() => setSelectedIds(prev => prev.includes(item.id) ? prev.filter(id => id !== item.id) : [...prev, item.id])} />
-                          </td>
-                          <td className="p-5">
-                            <div className="font-black text-slate-800 tracking-tight underline decoration-indigo-200 underline-offset-4">{item.caseNo}</div>
-                            <div className="text-[10px] text-slate-400 font-mono mt-1 font-bold">{item.timestamp}</div>
-                          </td>
-                          <td className="p-5">
-                            <div className="flex gap-1 mb-1">
-                              <span className={`px-2 py-0.5 rounded text-[10px] font-black ${item.caseType === '新案' ? 'bg-emerald-100 text-emerald-700' : 'bg-blue-100 text-blue-700'}`}>{item.caseType}</span>
-                              <span className="px-2 py-0.5 rounded text-[10px] bg-slate-100 text-slate-500 font-bold border border-slate-200">{item.caseClass}</span>
-                            </div>
-                            <div className="text-[10px] text-slate-400 font-medium italic truncate max-w-[150px]">{item.details} (Modes: {item.chModes || 0}/{item.enModes || 0})</div>
-                          </td>
-                          <td className="p-5">
-                            <span className="bg-indigo-50 text-indigo-700 px-3 py-1 rounded-lg font-black font-mono border border-indigo-100">{item.weight}</span>
-                          </td>
-                          <td className="p-5 font-black text-slate-700">{item.assignee}</td>
-                          <td className="p-5 text-center">
-                            <button onClick={() => setHistory(history.filter(h => h.id !== item.id))} className="text-slate-300 hover:text-red-500 opacity-0 group-hover:opacity-100 transition p-2 hover:bg-red-50 rounded-lg"><Trash2 className="w-4 h-4" /></button>
-                          </td>
-                        </tr>
-                      ))
-                    )}
-                  </tbody>
-                </table>
-              </div>
-            </section>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-};
 
-export default App;
+                <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                  
+                  {/* Personnel Management */}
+                  <div className="space-y-6">
+                    <section className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200">
+                      <h2 className="text-lg font-bold mb-4 flex items-center gap-2">
+                        <Users className="w-5 h-5 text-indigo-500" /> 工程師清單
+                      </h2>
+                      <div className="flex gap-2 mb-4">
+                        <input 
+                          className="flex-1 bg-slate-50 border border-slate-200 rounded-xl px-4 py-2 text-sm focus:ring-2 ring-indigo-500 outline-none font-medium"
+                          placeholder="輸入新成員..."
+                          value={newMember}
+                          onChange={(e) => setNewMember(e.target.value)}
+                          onKeyDown={(e) => e.key === 'Enter' && (newMember && !personnel.includes(newMember) && setPersonnel([...personnel, newMember], setNewMember('')))}
+                        />
+                        <button onClick={() => (newMember && !personnel.includes(newMember) && setPersonnel([...personnel, newMember], setNewMember('')))} className="bg-slate-800 text-white p-2.5 rounded-xl hover:bg-slate-900 transition">
+                          <Plus className="w-5 h-5" />
+                        </button>
+                      </div>
+                      <div className="space-y-3">
+                        {personnel.map(name => (
+                          <div key={name} className="flex items-center justify-between p-4 bg-slate-50 rounded-2xl group hover:shadow-md transition">
+                            <div>
+                              <div className="font-black text-slate-700">{name}</div>
+                              <div className="text-xs text-indigo-500 font-mono font-bold mt-0.5 tracking-tighter">累計負擔: {workload[name].toFixed(1)} Pts</div>
+                            </div>
+                            <button onClick={() => setPersonnel(personnel.filter(p => p !== name))} className="text-slate-300 hover:text-red-500 transition">
+                              <Trash2 className="w-5 h-5" />
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    </section>
+
+                    <section className="bg-indigo-600 p-6 rounded-2xl shadow-xl text-white relative overflow-hidden group">
+                      <div className="absolute top-0 right-0 p-4 opacity-10 group-hover:scale-110 transition duration-500">
+                        <Calculator className="w-24 h-24 rotate-12" />
+                      </div>
+                      <h2 className="text-indigo-100 font-bold mb-2">本次派案推薦</h2>
+                      {suggestedAssignee ? (
+                        <div className="relative z-10">
+                          <div className="text-4xl font-black mb-2 tracking-tight">{suggestedAssignee}</div>
+                          <div className="inline-block px-3 py-1 bg-white/20 backdrop-blur-md rounded-lg text-[10px] font-black uppercase">目前點數最低，公平起見請選他</div>
+                        </div>
+                      ) : (
+                        <p>請先設定成員</p>
+                      )}
+                    </section>
+                  </div>
+
+                  {/* Input Form */}
+                  <div className="lg:col-span-2 space-y-6">
+                    <section className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200">
+                      <h2 className="text-lg font-bold mb-6 flex items-center gap-2 text-slate-700">
+                        <FileText className="w-5 h-5 text-indigo-500" /> 填寫案件資訊
+                      </h2>
+                      
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+                        <div className="space-y-5">
+                          <div>
+                            <label className="block text-xs font-black text-slate-400 uppercase tracking-widest mb-2">案號 (Case Number)</label>
+                            <input 
+                              className="w-full bg-slate-50 border border-slate-200 rounded-2xl px-5 py-3 font-bold text-slate-700 focus:ring-4 ring-indigo-50/50 outline-none transition text-lg"
+                              placeholder="例如: ABC-12345"
+                              value={formData.caseNo}
+                              onChange={(e) => setFormData({...formData, caseNo: e.target.value})}
+                            />
+                          </div>
+
+                          <div className="grid grid-cols-2 gap-4">
+                            <div>
+                              <label className="block text-xs font-black text-slate-400 uppercase tracking-widest mb-2">案件屬性</label>
+                              <div className="flex bg-slate-100 p-1.5 rounded-2xl">
+                                {['新案', '舊案'].map(type => (
+                                  <button
+                                    key={type}
+                                    onClick={() => setFormData({...formData, caseType: type})}
+                                    className={`flex-1 py-2 text-sm rounded-xl font-bold transition ${formData.caseType === type ? 'bg-white shadow-sm text-indigo-600' : 'text-slate-400'}`}
+                                  >
+                                    {type}
+                                  </button>
+                                ))}
+                              </div>
+                            </div>
+                            <div>
+                              <label className="block text-xs font-black text-slate-400 uppercase tracking-widest mb-2">限制級別</label>
+                              <div className="flex bg-slate-100 p-1.5 rounded-2xl">
+                                {['Class A', 'Class B'].map(cls => (
+                                  <button
+                                    key={cls}
+                                    onClick={() => setFormData({...formData, caseClass: cls})}
+                                    className={`flex-1 py-2 text-sm rounded-xl font-bold transition ${formData.caseClass === cls ? 'bg-white shadow-sm text-indigo-600' : 'text-slate-400'}`}
+                                  >
+                                    {cls}
+                                  </button>
+                                ))}
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="space-y-4">
+                           <div className="bg-slate-50 p-5 rounded-3xl space-y-4 border border-slate-100">
+                            <div className="flex items-center justify-between">
+                              <label className="flex items-center gap-3 cursor-pointer group">
+                                <div className={`w-6 h-6 rounded-lg flex items-center justify-center border-2 transition ${formData.hasCH ? 'bg-indigo-600 border-indigo-600' : 'bg-white border-slate-300'}`}>
+                                  {formData.hasCH && <CheckCircle2 className="w-4 h-4 text-white" />}
+                                </div>
+                                <input type="checkbox" className="hidden" checked={formData.hasCH} onChange={(e) => setFormData({...formData, hasCH: e.target.checked})} />
+                                <span className={`font-black transition ${formData.hasCH ? 'text-indigo-900' : 'text-slate-400'}`}>中文報告</span>
+                              </label>
+                              <div className={`flex items-center gap-2 ${!formData.hasCH && 'opacity-20 grayscale'}`}>
+                                <input type="number" min="1" className="w-10 text-center bg-white border border-slate-200 rounded-lg py-1 font-bold text-indigo-600" value={formData.chCopies} onChange={(e) => setFormData({...formData, chCopies: parseInt(e.target.value)})} />
+                                <span className="text-slate-300">/</span>
+                                <input type="number" min="1" className="w-10 text-center bg-white border border-slate-200 rounded-lg py-1 font-bold text-indigo-600" value={formData.chModes} onChange={(e) => setFormData({...formData, chModes: parseInt(e.target.value)})} />
+                              </div>
+                            </div>
+                            <div className="flex items-center justify-between">
+                              <label className="flex items-center gap-3 cursor-pointer group">
+                                <div className={`w-6 h-6 rounded-lg flex items-center justify-center border-2 transition ${formData.hasEN ? 'bg-indigo-600 border-indigo-600' : 'bg-white border-slate-300'}`}>
+                                  {formData.hasEN && <CheckCircle2 className="w-4 h-4 text-white" />}
+                                </div>
+                                <input type="checkbox" className="hidden" checked={formData.hasEN} onChange={(e) => setFormData({...formData, hasEN: e.target.checked})} />
+                                <span className={`font-black transition ${formData.hasEN ? 'text-indigo-900' : 'text-slate-400'}`}>英文報告</span>
+                              </label>
+                              <div className={`flex items-center gap-2 ${!formData.hasEN && 'opacity-20 grayscale'}`}>
+                                <input type="number" min="1" className="w-10 text-center bg-white border border-slate-200 rounded-lg py-1 font-bold text-indigo-600" value={formData.enCopies} onChange={(e) => setFormData({...formData, enCopies: parseInt(e.target.value)})} />
+                                <span className="text-slate-300">/</span>
+                                <input type="number" min="1" className="w-10 text-center bg-white border border-slate-200 rounded-lg py-1 font-bold text-indigo-600" value={formData.enModes} onChange={(e) => setFormData({...formData, enModes: parseInt(e.target.value)})} />
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-3 gap-4 mt-8">
+                        {[{ key: 'isEval', label: '評估' }, { key: 'isChange', label: '變更加測' }, { key: 'isSpecial', label: '特殊案件' }].map(item => (
+                          <button
+                            key={item.key}
+                            onClick={() => setFormData({...formData, [item.key]: !formData[item.key]})}
+                            className={`flex items-center justify-center gap-3 p-4 rounded-2xl border-2 transition-all ${formData[item.key] ? 'bg-indigo-50 border-indigo-600 text-indigo-700 font-black shadow-inner' : 'bg-white border-slate-100 text-slate-400 hover:border-slate-200'}`}
+                          >
+                            {formData[item.key] && <CheckCircle2 className="w-5 h-5 animate-in zoom-in" />}
+                            {item.label}
+                          </button>
+                        ))}
+                      </div>
+
+                      <div className="mt-10 p-6 bg-slate-900 rounded-3xl flex flex-col md:flex-row items-center justify-between gap-6 shadow-2xl border border-slate-800">
+                        <div className="flex items-center gap-5">
+                          <div className="bg-white/10 p-4 rounded-2xl text-amber-400 border border-white/5">
+                            <Calculator className="w-8 h-8" />
+                          </div>
+                          <div>
+                            <div className="text-[10px] font-black text-slate-500 uppercase tracking-widest">本次派發權重總計</div>
+                            <div className="text-3xl font-black text-white">{currentWeight} <span className="text-sm font-normal text-slate-500 ml-1">Pts</span></div>
+                          </div>
+                        </div>
+
+                        <div className="flex flex-wrap gap-2 justify-center">
+                          {personnel.map(name => (
+                            <button
+                              key={name}
+                              onClick={() => handleAssign(name)}
+                              className={`px-6 py-3 rounded-2xl font-black transition-all ${suggestedAssignee === name ? 'bg-indigo-600 text-white hover:bg-indigo-500 scale-110 shadow-lg shadow-indigo-500/40 ring-4 ring-indigo-500/20' : 'bg-slate-800 text-slate-400 hover:text-white hover:bg-slate-700 border border-slate-700'}`}
+                            >
+                              {name}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    </section>
+
+                    {/* History Table */}
+                    <section className="bg-white rounded-3xl shadow-sm border border-slate-200 overflow-hidden">
+                      <div className="p-6 border-b border-slate-100 flex justify-between items-center bg-slate-50/30">
+                        <h2 className="font-black text-slate-700 flex items-center gap-3">
+                          <History className="w-5 h-5 text-indigo-500" /> 派案紀錄總覽
+                        </h2>
+                        {selectedIds.length > 0 && (
+                          <button 
+                            onClick={() => { setHistory(history.filter(h => !selectedIds.includes(h.id))); setSelectedIds([]); }}
+                            className="flex items-center gap-2 bg-red-50 text-red-600 px-4 py-2 rounded-xl border border-red-100 hover:bg-red-100 transition text-sm font-black"
+                          >
+                            <Trash2 className="w-4 h-4" /> 刪除已選 ({selectedIds.length})
+                          </button>
+                        )}
+                      </div>
+                      <div className="overflow-x-auto">
+                        <table className="w-full text-left">
+                          <thead className="bg-slate-50 text-[10px] uppercase font-black tracking-[0.2em] text-slate-400">
+                            <tr>
+                              <th className="p-5 w-10 text-center">
+                                <input type="checkbox" className="rounded border-slate-300" onChange={(e) => setSelectedIds(e.target.checked ? history.map(h => h.id) : [])} checked={history.length > 0 && selectedIds.length === history.length}/>
+                              </th>
+                              <th className="p-5">案號 / 時間</th>
+                              <th className="p-5">明細與加項</th>
+                              <th className="p-5">權重</th>
+                              <th className="p-5">負責人</th>
+                              <th className="p-5 text-center">操作</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-slate-100">
+                            {history.length === 0 ? (
+                              <tr><td colSpan="6" className="p-20 text-center text-slate-400 font-medium italic">空空如也，趕快去派個案子吧！</td></tr>
+                            ) : (
+                              history.map(item => (
+                                <tr key={item.id} className={`group transition ${selectedIds.includes(item.id) ? 'bg-indigo-50/50' : 'hover:bg-slate-50/80'}`}>
+                                  <td className="p-5 text-center">
+                                    <input type="checkbox" className="rounded text-indigo-600 border-slate-300" checked={selectedIds.includes(item.id)} onChange={() => setSelectedIds(prev => prev.includes(item.id) ? prev.filter(id => id !== item.id) : [...prev, item.id])} />
+                                  </td>
+                                  <td className="p-5">
+                                    <div className="font-black text-slate-800 tracking-tight underline decoration-indigo-200 underline-offset-4">{item.caseNo}</div>
+                                    <div className="text-[10px] text-slate-400 font-mono mt-1 font-bold">{item.timestamp}</div>
+                                  </td>
+                                  <td className="p-5">
+                                    <div className="flex gap-1 mb-1">
+                                      <span className={`px-2 py-0.5 rounded text-[10px] font-black ${item.caseType === '新案' ? 'bg-emerald-100 text-emerald-700' : 'bg-blue-100 text-blue-700'}`}>{item.caseType}</span>
+                                      <span className="px-2 py-0.5 rounded text-[10px] bg-slate-100 text-slate-500 font-bold border border-slate-200">{item.caseClass}</span>
+                                    </div>
+                                    <div className="text-[10px] text-slate-400 font-medium italic truncate max-w-[150px]">{item.details} (Modes: {item.chModes || 0}/{item.enModes || 0})</div>
+                                  </td>
+                                  <td className="p-5">
+                                    <span className="bg-indigo-50 text-indigo-700 px-3 py-1 rounded-lg font-black font-mono border border-indigo-100">{item.weight}</span>
+                                  </td>
+                                  <td className="p-5 font-black text-slate-700">{item.assignee}</td>
+                                  <td className="p-5 text-center">
+                                    <button onClick={() => setHistory(history.filter(h => h.id !== item.id))} className="text-slate-300 hover:text-red-500 opacity-0 group-hover:opacity-100 transition p-2 hover:bg-red-50 rounded-lg"><Trash2 className="w-4 h-4" /></button>
+                                  </td>
+                                </tr>
+                              ))
+                            )}
+                          </tbody>
+                        </table>
+                      </div>
+                    </section>
+                  </div>
+                </div>
+              </div>
+            </div>
+          );
+        };
+
+        // --- 啟動程式 ---
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
